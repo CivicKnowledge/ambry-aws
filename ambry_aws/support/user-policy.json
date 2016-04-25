@@ -2,15 +2,34 @@
     "Version": "2012-10-17",
     "Statement": [
         {
+            "Sid": "list",
+            "Action": [
+                "s3:ListBucket"
+            ],
+            "Effect": "Allow",
+            "Resource": [
+            ],
+            "Condition": {
+                "StringEquals": {
+                    "s3:prefix": [
+                        ""
+                    ],
+                    "s3:delimiter": [
+                        "/"
+                    ]
+                }
+            }
+        },
+        {
             "Sid": "bucket",
             "Effect": "Allow",
             "Action": [
                 "s3:GetBucketLocation",
-                "s3:ListBucket"
+                "s3:ListAllMyBuckets"
             ]
         },
         {
-            "Sid": "get",
+            "Sid": "read",
             "Effect": "Allow",
             "Action": [
                 "s3:GetObject"
@@ -18,7 +37,7 @@
             "Resource": []
         },
         {
-            "Sid": "put",
+            "Sid": "write",
             "Effect": "Allow",
             "Action": [
                 "s3:PutObject"

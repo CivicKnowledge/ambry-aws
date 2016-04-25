@@ -22,7 +22,7 @@ if sys.argv[-1] == 'publish':
 with open(os.path.join(os.path.dirname(__file__), 'README.rst')) as f:
     readme = f.read()
 
-ps_meta = imp.load_source('_meta', 'ambry_admin/__meta__.py')
+ps_meta = imp.load_source('_meta', 'ambry_aws/__meta__.py')
 
 packages = find_packages()
 
