@@ -17,7 +17,6 @@ def make_parser(cmd):
     config_p = cmd.add_parser(command_name, help='Manage AWS resources for Ambry')
     config_p.set_defaults(command=command_name)
 
-
     config_p.add_argument('profile_name', type=str, nargs='?', help='Name of boto/aws credentials file')
     asp = config_p.add_subparsers(title='AWS commands', help='AWS commands')
 
@@ -54,14 +53,16 @@ def make_parser(cmd):
     sp.add_argument('user_name', help='User name')
     sp.add_argument('bucket', help='Bucket name')
 
-    sp = asp.add_parser('test', help="Devel Test")
-    sp.set_defaults(subcommand=test)
-
+    sp = asp.add_parser('remotes', help="Dump remotes configuration for a user")
+    sp.set_defaults(subcommand=remotes)
+    sp.add_argument('user_name', help='User name')
 
 
 
 AMBRY_PATH='/ambry/'
 TOP_LEVEL_DIRS = ('system','test','public','restricted','private')
+
+policy_name = 'ambry-s3' # User policy name
 
 def run_command(args, rc):
     from ambry.library import new_library
@@ -346,14 +347,6 @@ def init_bucket(args, l, rc):
 
 
 
-def make_group_name(bucket_name, prefix, write):
-
-    clean_cb_name = bucket_name.replace('.', '-')
-
-    gn = "{}-{}-{}".format(clean_cb_name, prefix, 'rw' if write else 'r')
-
-    return gn
-
 def split_bucket_name(bucket, default = 'public'):
 
     if '/' in bucket:
@@ -371,8 +364,6 @@ def split_bucket_name(bucket, default = 'public'):
 def perm(args, l, rc):
 
     from botocore.exceptions import ClientError
-
-    policy_name = 'ambry-s3'
 
     iam = get_resource(args, 'iam')
 
@@ -421,14 +412,14 @@ def perm(args, l, rc):
 
 
 def list_users(args, l, rc):
-
+    from botocore.exceptions import ClientError
     import tabulate
 
     client = get_client(args, 'iam')
     iam = get_resource(args, 'iam')
 
     records = []
-    headers = 'Name Bucket Subdir Permissions'.split()
+    headers = 'Name Bucket Subdir Perm'.split()
 
     users = client.list_users(PathPrefix='/')
 
@@ -436,16 +427,21 @@ def list_users(args, l, rc):
 
         user = iam.User(user_info['UserName'])
 
-        for group in user.groups.all():
-            if AMBRY_PATH in group.path:
-                parts = group.name.split('-')
-                perms = parts.pop()
-                subdir = parts.pop()
-                bucket = '.'.join(parts)
-                records.append([user.name, bucket, subdir, perms])
+        try:
+            policy = user.Policy(policy_name)
+            perms = policy_to_dict(policy.policy_document)
+
+        except ClientError:
+            perms = {}
+            policy = None
+
+        if perms:
+            for (bucket, prefix), perms in sorted(perms.items()):
+                records.append([user.name, bucket, prefix, perms])
+        else:
+            records.append([user.name, None, None, None])
 
     print tabulate.tabulate(records, headers)
-
 
 
 def get_iam_account(l, args, user_name):
@@ -464,6 +460,8 @@ def test_user(args, l, rc):
 
     account = get_iam_account(l, args, args.user_name)
 
+    if not account.access_key:
+        fatal("Can't test user {}; library does not have record for account ( by arn ) ".format(args.user_name))
 
     session = boto3.Session(aws_access_key_id=account.access_key,
                             aws_secret_access_key=account.secret)
@@ -479,7 +477,7 @@ def test_user(args, l, rc):
     prefixes = [prefix] if prefix else TOP_LEVEL_DIRS
 
     for prefix in prefixes:
-        k = prefix+'/test'+args.user_name
+        k = prefix+'/test/'+args.user_name
         rk = k+'-root'
 
         ro = root_bucket.put_object(Key=rk, Body=args.user_name)
@@ -505,64 +503,53 @@ def test_user(args, l, rc):
 
         #ro.delete()
 
-        prt("{:<25s} {:<5s} {:<5s} {:<6s} {}".format(k, 'read' if read else '',
+        prt("{:<35s} {:<5s} {:<5s} {:<6s} {}".format(k, 'read' if read else '',
                                                   'write' if write else '',
                                                   'delete' if delete else '',
                                                   'no access' if not any((read, write, delete)) else '' ))
 
 
-    return
 
-    def get_statement(name):
-        for s in doc['Statement']:
-            if s['Sid'] == name:
-                return s
+def remotes(args, l, rc):
+    import yaml
+    from botocore.exceptions import ClientError
 
-    for group in user.groups.all():
-        for policy in group.policies.all():
-            doc = policy.policy_document
+    iam = get_resource(args, 'iam')
 
-            read = get_statement('read')
-            for resource in read['Resource']:
-                resource = resource.replace('arn:aws:s3:::','').replace('/*','')
-                print resource
+    user = iam.User(args.user_name)
 
-                bucket, prefix = resource.split('/')
+    try:
+        policy = user.Policy(policy_name)
+        perms = policy_to_dict(policy.policy_document)
 
-                print "READ", bucket, prefix
+    except ClientError:
+        perms = {}
+        policy = None
 
-            write = get_statement('write')
-            if write:
-                for resource in read['Resource']:
-                    resource = resource.replace('arn:aws:s3:::', '').replace('/*', '')
+    account = get_iam_account(l, args, args.user_name)
 
-                    bucket, prefix = resource.split('/')
+    remotes = {}
 
-                    print "READ", bucket, prefix
+    for i, ((bucket, prefix), perm) in enumerate(perms.items()):
 
+        if prefix not in remotes:
+            name = prefix
+        else:
+            name = "{}{}".format(prefix,i)
 
-def test(args, l, rc):
-
-
-    d = {
-        ('foo.com', 'a'): 'R',
-        ('foo.com', 'b'): 'R',
-        ('foo.com', 'c'): 'W',
-        ('bar.com', 'a'): 'R',
-        ('bar.com', 'b'): 'R',
-        ('bar.com', 'c'): 'W',
-    }
+        remotes[name]={
+            'service': 's3',
+            'username': user.arn,
+            'url': "s3://{}/{}".format(bucket, prefix),
+            'access': account.access_key,
+            'secret': account.secret
+        }
 
 
-    doc =  dict_to_policy(d)
-
-    d2 = policy_to_dict(doc)
-
-    print d
-
-    print d2
-
-    doc2 = dict_to_policy(d2)
+    print yaml.safe_dump({'remotes': remotes},
+                    default_flow_style=False, indent=4, encoding='utf-8')
 
 
-    assert doc == doc2
+
+
+

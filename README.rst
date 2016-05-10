@@ -12,9 +12,9 @@ The buckets are created with these sub-directories:
 * system
 * test
 
-For each of these sub-directories, the 'init-bucket' command will create two groups, a read group and a read-write group.
+New users will be created with the `/ambry/` path, although you can set permissions for any users, even those not created through this API. Setting permissions on a sub-directory will edit a policy names 'ambry-s3' that is attached to the user.
 
-New users will be created with the `/ambry/` path, although you can set permissions for any users, even those not created through this API.
+When new users are created with the `ambry aws new-user` command, the access key and secrets are stored in the library. Use `ambry accounts list -v iam  -s ` to list all of the iam accounts, including their secrets.
 
 # Use Examples
 
