@@ -29,6 +29,10 @@ def make_parser(cmd):
     sp = asp.add_parser('list-users', help="List users")
     sp.set_defaults(subcommand=list_users)
 
+    sp = asp.add_parser('list-bucket-users', help="List users with permissions on a bucket")
+    sp.set_defaults(subcommand=list_bucket_users)
+    sp.add_argument('bucket', help='Bucket name')
+
     sp = asp.add_parser('init-bucket', help="Initialize ambry buckets")
     sp.set_defaults(subcommand=init_bucket)
     sp.add_argument('bucket_name', help='Bucket name')
@@ -57,6 +61,8 @@ def make_parser(cmd):
     sp.set_defaults(subcommand=remotes)
     sp.add_argument('user_name', help='User name')
 
+    sp = asp.add_parser('test', help="Development test")
+    sp.set_defaults(subcommand=test)
 
 
 AMBRY_PATH='/ambry/'
@@ -194,40 +200,13 @@ def make_group_policy(bucket, prefix, write=False):
 
 arn_prefix = 'arn:aws:s3:::'
 
-def policy_to_dict(doc):
-    """Convert a user policy to a dict mapping bucket/prefix names to 'R' or 'W' """
-
-    import json
-
-    if not isinstance(doc, dict):
-        doc = json.loads(doc)
-
-    d = {}
-
-    def get_statement(name):
-        for s in doc['Statement']:
-            if s['Sid'] == name:
-                return s
-
-    for r in get_statement('read')['Resource']:
-        bucket, prefix = r.replace(arn_prefix,'').replace('/*','').split('/')
-        d[(bucket, prefix.strip('/'))] = 'R'
-
-    try:
-        for r in get_statement('write')['Resource']:
-            bucket, prefix = r.replace(arn_prefix, '').replace('/*','').split('/')
-            d[(bucket, prefix.strip('/'))] = 'W'
-    except TypeError:
-        pass # No write section
-
-    return d
-
-
-def dict_to_policy(d):
+def user_dict_to_policy(d):
 
     import json
     import ambry_aws
     from os.path import dirname, join, abspath
+
+
 
     policy_path = join(dirname(abspath(ambry_aws.__file__)), 'support', 'user-policy.json')
 
@@ -285,8 +264,150 @@ def dict_to_policy(d):
             }
         )
 
-
     return json.dumps(doc, indent=4)
+
+def user_policy_to_dict(doc):
+    """Convert a bucket policy to a dict mapping principal/prefix names to 'R' or 'W' """
+
+    import json
+
+    if not isinstance(doc, dict):
+        doc = json.loads(doc)
+
+    d = {}
+
+    def get_statement(name):
+        for s in doc['Statement']:
+            if s['Sid'] == name:
+                return s
+
+    for r in get_statement('read')['Principal']['AWS']:
+        bucket, prefix = r.replace(arn_prefix,'').replace('/*','').split('/')
+        d[(bucket, prefix.strip('/'))] = 'R'
+
+    try:
+        for r in get_statement('write')['Resource']:
+            bucket, prefix = r.replace(arn_prefix, '').replace('/*','').split('/')
+            d[(bucket, prefix.strip('/'))] = 'W'
+    except TypeError:
+        pass # No write section
+
+    return d
+
+def make_bucket_policy_statements(bucket):
+    """Return the statemtns in a bucket policy as a dict of dicts"""
+    import yaml
+    import ambry_aws
+    from os.path import dirname, join, abspath
+    import copy
+
+    with open(join(dirname(abspath(ambry_aws.__file__)), 'support', 'policy_parts.yaml')) as f:
+        parts = yaml.load(f)
+
+    statements = {}
+
+    cl = copy.deepcopy(parts['list'])
+    cl['Resource'] = arn_prefix+bucket
+    statements['list'] = cl
+
+    cl = copy.deepcopy(parts['bucket'])
+    cl['Resource'] = arn_prefix + bucket
+    statements['bucket'] = cl
+
+    for sd in TOP_LEVEL_DIRS:
+        cl = copy.deepcopy(parts['read'])
+        cl['Resource'] = arn_prefix + bucket +'/' + sd + '/*'
+        cl['Sid'] = cl['Sid'].title()+sd.title()
+
+        statements[cl['Sid']] = cl
+
+        cl = copy.deepcopy(parts['write'])
+        cl['Resource'] = arn_prefix + bucket +'/' + sd + '/*'
+        cl['Sid'] = cl['Sid'].title() + sd.title()
+
+        statements[cl['Sid']] = cl
+
+    return statements
+
+def bucket_dict_to_policy(args, bucket_name, d):
+    """
+    Create a bucket policy document from a permissions dict.
+
+    The dictionary d maps (user, prefix) to 'R' or 'W'.
+
+    :param bucket_name:
+    :param d:
+    :return:
+    """
+
+    import json
+    import ambry_aws
+    from os.path import dirname, join, abspath
+
+    iam = get_resource(args, 'iam')
+
+    statements = make_bucket_policy_statements(bucket_name)
+
+    user_stats = set() # statement tripples
+
+    for (user, prefix), mode in d.items():
+
+        user_stats.add((user, 'list'))
+        user_stats.add((user, 'bucket'))
+
+        if mode == 'R':
+            user_stats.add((user, 'Read' + prefix.title()))
+        elif mode == 'W':
+            user_stats.add((user, 'Read' + prefix.title()))
+            user_stats.add((user, 'Write' + prefix.title()))
+
+    users_arns = {}
+
+    for user_name, section in user_stats:
+        section = statements[section]
+
+        if user_name not in users_arns:
+            user = iam.User(user_name)
+            users_arns[user.name] = user
+        else:
+            user = users_arns[user_name]
+
+        section['Principal']['AWS'].append(user.arn)
+
+    for sid in statements.keys():
+        if not statements[sid]['Principal']['AWS']:
+            del statements[sid]
+
+    return json.dumps(dict(Version="2012-10-17", Statement=list(statements.values())), indent=4)
+
+def bucket_policy_to_dict(policy):
+    """Produce a dictionary of read, write permissions for an existing bucket policy document"""
+    import json
+
+    if not isinstance(policy, dict):
+        policy = json.loads(policy)
+
+    statements = { s['Sid']:s for s in policy['Statement'] }
+
+    d = {}
+
+    for rw in ('Read', 'Write'):
+        for prefix in TOP_LEVEL_DIRS:
+            sid = rw.title() + prefix.title()
+
+            if sid in statements:
+
+                if isinstance(statements[sid]['Principal']['AWS'], list):
+
+                    for principal in statements[sid]['Principal']['AWS']:
+
+                        user_name = principal.split('/').pop()
+                        d[(user_name, prefix)] = rw[0]
+                else:
+                    user_name = statements[sid]['Principal']['AWS'].split('/').pop()
+                    d[(user_name, prefix)] = rw[0]
+
+    return d
 
 
 def delete_user(args, l, rc):
@@ -306,10 +427,6 @@ def delete_user(args, l, rc):
             prt("Deleting user policy: {}",policy.name)
             policy.delete()
 
-        for group in user.groups.all():
-            prt("Removing user from group: {}",group.name)
-            user.remove_group(GroupName=group.name)
-
         response = client.delete_user(UserName=args.user_name)
         prt("Deleted user: {}".format(args.user_name))
 
@@ -317,34 +434,17 @@ def delete_user(args, l, rc):
         fatal("Could not delete user: {}".format(e))
 
 
+
+
 def init_bucket(args, l, rc):
     from botocore.exceptions import ClientError
+    import json
 
     s3 = get_resource(args, 's3')
-    iam = get_resource(args, 'iam')
 
     b = s3.Bucket(args.bucket_name)
 
-    clean_cb_name = args.bucket_name.replace('.','-')
-
-    r = b.create()
-
-    for prefix in TOP_LEVEL_DIRS:
-        for write in (True, False):
-
-            gp_name = "{}-{}-{}".format(clean_cb_name,prefix, 'rw' if write else 'r')
-
-            name = "{}/{} {}".format(args.bucket_name, prefix, 'RW' if write else 'R ')
-
-            group = iam.Group(gp_name)
-            try:
-                r = group.create(Path=AMBRY_PATH)
-                policy = group.Policy(gp_name)
-                policy.put(PolicyDocument=make_group_policy(b.name, prefix, write))
-
-            except ClientError as e:
-                print '!!!', e, dir(e)
-
+    b.create()
 
 
 def split_bucket_name(bucket, default = 'public'):
@@ -364,6 +464,7 @@ def split_bucket_name(bucket, default = 'public'):
 def perm(args, l, rc):
 
     from botocore.exceptions import ClientError
+    import json
 
     iam = get_resource(args, 'iam')
 
@@ -376,39 +477,39 @@ def perm(args, l, rc):
 
     user = iam.User(args.user_name)
 
+    b = get_resource(args, 's3').Bucket(bn)
+
     try:
-        policy = user.Policy(policy_name)
-        perms = policy_to_dict(policy.policy_document)
+
+        bucket_policy = b.Policy().policy
+        perms = bucket_policy_to_dict(bucket_policy)
 
     except ClientError:
         perms = {}
-        policy = None
+        bucket_policy = None
 
     for prefix in prefixes:
         if args.delete:
-            if  (bn,prefix) in perms:
-                del perms[(bn,prefix)]
-                prt("Removed {}/{} from {}".format(bn,prefix, user.name))
+            if (user.arn, prefix) in perms:
+                del perms[(user.name, prefix)]
+                prt("Removed {}/{} from {}".format(bn, prefix, user.name))
         else:
 
             if args.write:
-                perms[(bn, prefix)] = 'W'
+                perms[(user.name, prefix)] = 'W'
                 prt("Added write {}/{} to {}".format(bn, prefix, user.name))
                 has_writes = True
             else:
-                perms[(bn, prefix)] = 'R'
+                perms[(user.name, prefix)] = 'R'
                 prt("Added read {}/{} to {}".format(bn, prefix, user.name))
 
-
     if perms:
-        user.create_policy(
-            PolicyName=policy_name,
-            PolicyDocument=dict_to_policy(perms)
-        )
+        b = get_resource(args, 's3').Bucket(bn)
+        policy = bucket_dict_to_policy(args, bn, perms)
+        b.Policy().put(Policy=policy)
 
-
-    elif policy:
-        policy.delete()
+    elif bucket_policy:
+        bucket_policy.delete()
 
 
 def list_users(args, l, rc):
@@ -419,7 +520,7 @@ def list_users(args, l, rc):
     iam = get_resource(args, 'iam')
 
     records = []
-    headers = 'Name Bucket Subdir Perm'.split()
+    headers = 'Name ARN'.split()
 
     users = client.list_users(PathPrefix='/')
 
@@ -427,22 +528,38 @@ def list_users(args, l, rc):
 
         user = iam.User(user_info['UserName'])
 
-        try:
-            policy = user.Policy(policy_name)
-            perms = policy_to_dict(policy.policy_document)
-
-        except ClientError:
-            perms = {}
-            policy = None
-
-        if perms:
-            for (bucket, prefix), perms in sorted(perms.items()):
-                records.append([user.name, bucket, prefix, perms])
-        else:
-            records.append([user.name, None, None, None])
+        records.append([user.name, user.arn])
 
     print tabulate.tabulate(records, headers)
 
+def list_bucket_users(args, l, rc):
+    from botocore.exceptions import ClientError
+    import tabulate
+
+    client = get_client(args, 'iam')
+    iam = get_resource(args, 'iam')
+
+    b = get_resource(args, 's3').Bucket(args.bucket)
+
+    perms = bucket_policy_to_dict(b.Policy().policy)
+
+    records = []
+    headers = ['Name'] + list(TOP_LEVEL_DIRS)
+
+    users = client.list_users(PathPrefix='/')
+
+    for user_info in users['Users']:
+
+        user = iam.User(user_info['UserName'])
+
+        row = [user.name]
+
+        for prefix in TOP_LEVEL_DIRS:
+            row.append(perms.get((user.name, prefix)))
+
+        records.append(row)
+
+    print tabulate.tabulate(records, headers)
 
 def get_iam_account(l, args, user_name):
     """Return the local Account for a user name, by fetching User and looking up
@@ -509,7 +626,6 @@ def test_user(args, l, rc):
                                                   'no access' if not any((read, write, delete)) else '' ))
 
 
-
 def remotes(args, l, rc):
     import yaml
     from botocore.exceptions import ClientError
@@ -550,6 +666,16 @@ def remotes(args, l, rc):
                     default_flow_style=False, indent=4, encoding='utf-8')
 
 
+def test(args, l, rc):
 
+    p = bucket_dict_to_policy(args, 'analysis.civicknowledge.org',{
+        ('eric', 'public'): 'R',
+        ('eric', 'private'): 'W',
+        ('eric-devel', 'public'): 'R',
+        ('eric-devel', 'private'): 'W',
+        ('eric-devel', 'restricted'): 'W',
+    })
+
+    print bucket_policy_to_dict(p)
 
 

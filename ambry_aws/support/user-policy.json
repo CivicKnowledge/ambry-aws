@@ -24,14 +24,17 @@
             "Sid": "bucket",
             "Effect": "Allow",
             "Action": [
+                "s3:GetBucketAcl",
                 "s3:GetBucketLocation",
                 "s3:ListAllMyBuckets"
-            ]
+            ],
+            "Resource": []
         },
         {
             "Sid": "read",
             "Effect": "Allow",
             "Action": [
+                "s3:GetObjectAcl",
                 "s3:GetObject"
             ],
             "Resource": []
