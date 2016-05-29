@@ -57,13 +57,14 @@ def make_parser(cmd):
     sp.add_argument('user_name', help='User name')
     sp.add_argument('bucket', help='Bucket name')
 
-    sp = asp.add_parser('remotes', help="Dump remotes configuration for a user")
-    sp.set_defaults(subcommand=remotes)
-    sp.add_argument('user_name', help='User name')
+    sp = asp.add_parser('scrape', help="Dump files in a bucket a source refs")
+    sp.set_defaults(subcommand=scrape)
+    sp.add_argument('bucket', help='Bucket name')
+    sp.add_argument('-c', '--csv', default=False, action='store_true', help="Output as CSV, for used in sources.csv")
 
-    sp = asp.add_parser('test', help="Development test")
-    sp.set_defaults(subcommand=test)
-
+    sp = asp.add_parser('fix-meta', help="Fix the meta directories")
+    sp.set_defaults(subcommand=fix_meta)
+    sp.add_argument('bucket', help='Bucket name')
 
 AMBRY_PATH='/ambry/'
 TOP_LEVEL_DIRS = ('system','test','public','restricted','private')
@@ -327,6 +328,13 @@ def make_bucket_policy_statements(bucket):
 
         statements[cl['Sid']] = cl
 
+        cl = copy.deepcopy(parts['listb'])
+        cl['Resource'] = arn_prefix + bucket
+        cl['Sid'] = cl['Sid'].title() + sd.title()
+        cl['Condition']['StringLike']['s3:prefix'] = [sd + '/*' ]
+
+        statements[cl['Sid']] = cl
+
     return statements
 
 def bucket_dict_to_policy(args, bucket_name, d):
@@ -357,7 +365,9 @@ def bucket_dict_to_policy(args, bucket_name, d):
 
         if mode == 'R':
             user_stats.add((user, 'Read' + prefix.title()))
+            user_stats.add((user, 'List' + prefix.title()))
         elif mode == 'W':
+            user_stats.add((user, 'List' + prefix.title()))
             user_stats.add((user, 'Read' + prefix.title()))
             user_stats.add((user, 'Write' + prefix.title()))
 
@@ -450,7 +460,7 @@ def init_bucket(args, l, rc):
 def split_bucket_name(bucket, default = 'public'):
 
     if '/' in bucket:
-        bn, prefix = bucket.split('/')
+        bn, prefix = bucket.split('/', 1)
     elif default != False:
         bn = bucket
         prefix = default
@@ -506,7 +516,10 @@ def perm(args, l, rc):
     if perms:
         b = get_resource(args, 's3').Bucket(bn)
         policy = bucket_dict_to_policy(args, bn, perms)
+
         b.Policy().put(Policy=policy)
+
+
 
     elif bucket_policy:
         bucket_policy.delete()
@@ -520,7 +533,7 @@ def list_users(args, l, rc):
     iam = get_resource(args, 'iam')
 
     records = []
-    headers = 'Name ARN'.split()
+    headers = 'Name access ARN'.split()
 
     users = client.list_users(PathPrefix='/')
 
@@ -528,7 +541,7 @@ def list_users(args, l, rc):
 
         user = iam.User(user_info['UserName'])
 
-        records.append([user.name, user.arn])
+        records.append([user.name, list(user.access_keys.all())[0].id , user.arn])
 
     print tabulate.tabulate(records, headers)
 
@@ -541,7 +554,10 @@ def list_bucket_users(args, l, rc):
 
     b = get_resource(args, 's3').Bucket(args.bucket)
 
-    perms = bucket_policy_to_dict(b.Policy().policy)
+    try:
+        perms = bucket_policy_to_dict(b.Policy().policy)
+    except ClientError:
+        perms = {}
 
     records = []
     headers = ['Name'] + list(TOP_LEVEL_DIRS)
@@ -554,10 +570,14 @@ def list_bucket_users(args, l, rc):
 
         row = [user.name]
 
+        perm_count = 0
         for prefix in TOP_LEVEL_DIRS:
-            row.append(perms.get((user.name, prefix)))
+            perm = perms.get((user.name, prefix))
+            perm_count += int(perm is not None)
+            row.append(perm)
 
-        records.append(row)
+        if perm_count:
+            records.append(row)
 
     print tabulate.tabulate(records, headers)
 
@@ -626,56 +646,71 @@ def test_user(args, l, rc):
                                                   'no access' if not any((read, write, delete)) else '' ))
 
 
-def remotes(args, l, rc):
-    import yaml
-    from botocore.exceptions import ClientError
-
-    iam = get_resource(args, 'iam')
-
-    user = iam.User(args.user_name)
-
-    try:
-        policy = user.Policy(policy_name)
-        perms = policy_to_dict(policy.policy_document)
-
-    except ClientError:
-        perms = {}
-        policy = None
-
-    account = get_iam_account(l, args, args.user_name)
-
-    remotes = {}
-
-    for i, ((bucket, prefix), perm) in enumerate(perms.items()):
-
-        if prefix not in remotes:
-            name = prefix
-        else:
-            name = "{}{}".format(prefix,i)
-
-        remotes[name]={
-            'service': 's3',
-            'username': user.arn,
-            'url': "s3://{}/{}".format(bucket, prefix),
-            'access': account.access_key,
-            'secret': account.secret
-        }
 
 
-    print yaml.safe_dump({'remotes': remotes},
-                    default_flow_style=False, indent=4, encoding='utf-8')
+def scrape(args, l, rc):
+
+    bn, prefix = split_bucket_name(args.bucket, default=False)
+
+    b = get_resource(args, 's3').Bucket(bn)
+
+    if args.csv:
+        import csv
+        import sys
+        from os.path import splitext
+
+        w = csv.writer(sys.stdout)
+        w.writerow(['name','ref'])
+        for key in b.objects.filter(Prefix=prefix):
+            name, _ = splitext(key.key.split('/').pop())
+            ref = "s3://"+key.bucket_name+'/'+key.key
+            w.writerow([name, ref])
+
+    else:
+        for key in b.objects.filter(Prefix=prefix):
+            print key.key
+
+def fix_meta(args, l, rc):
 
 
-def test(args, l, rc):
+    from ambry.orm import Database
+    from ambry.util.flo import copy_file_or_flo
+    from tempfile import NamedTemporaryFile
+    from os import remove
+    from sqlalchemy.exc import DatabaseError
+    from ambry.orm.remote import Remote
 
-    p = bucket_dict_to_policy(args, 'analysis.civicknowledge.org',{
-        ('eric', 'public'): 'R',
-        ('eric', 'private'): 'W',
-        ('eric-devel', 'public'): 'R',
-        ('eric-devel', 'private'): 'W',
-        ('eric-devel', 'restricted'): 'W',
-    })
+    bn, prefix = split_bucket_name(args.bucket, default = False)
 
-    print bucket_policy_to_dict(p)
+    if not prefix:
+        prefixes = TOP_LEVEL_DIRS
+    else:
+        prefixes = [prefix]
 
+    b = get_resource(args, 's3').Bucket(bn)
 
+    for summary in b.objects.filter(Prefix=prefix):
+        if '/meta/' in summary.key or '_meta' in summary.key:
+            continue
+
+        if summary.key.endswith('.db'):
+            print summary.key
+
+            stream = summary.get()['Body']
+            db_f = NamedTemporaryFile(delete=False)
+
+            copy_file_or_flo(stream, db_f)
+
+            db_f.close()
+
+            try:
+                db = Database('sqlite:///{}'.format(db_f.name))
+                db.open()
+
+                meta_stack = Remote._meta_infos(db.package_dataset)
+
+                print meta_stack
+
+                remove(db_f.name)
+            except DatabaseError as e:
+                err("Failed to load database {}: {}".format(summary.key, e))

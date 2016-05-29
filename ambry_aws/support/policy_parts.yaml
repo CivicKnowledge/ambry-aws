@@ -33,8 +33,23 @@ read:
 write:
   Action:
   - s3:PutObject
+  - s3:PutObjectAcl
+  - s3:DeleteObject
   Effect: Allow
   Resource: []
   Sid: write
   Principal:
     AWS: []
+listb:
+  Action:
+  - s3:ListBucket
+  Effect: Allow
+  Resource: []
+  Sid: list
+  Principal:
+    AWS: []
+  Condition:
+    StringLike:
+        s3:prefix:
+        - ''
+
