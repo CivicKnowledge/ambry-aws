@@ -1,4 +1,5 @@
-# ambry-aws
+ambry-aws
+=========
 
 Create and manage S3 buckets and users for use as Ambry library repositories.
 
@@ -16,7 +17,8 @@ New users will be created with the `/ambry/` path, although you can set permissi
 
 When new users are created with the `ambry aws new-user` command, the access key and secrets are stored in the library. Use `ambry accounts list -v iam  -s ` to list all of the iam accounts, including their secrets.
 
-# Use Examples
+Use Examples
+------------
 
 Setup a profile in the credentials, probably by editing your `~/.aws/credentials` file. The credentials must be for a user that can create buckets and users, probably one with the Administrator permissions.
 
@@ -52,8 +54,8 @@ Test all of the user's permissions against a bucket:
 
 Be sure to [setup your AWS credentials for boto](https://boto3.readthedocs.org/en/latest/guide/quickstart.html).
 
-
 Operations
+----------
 
 * Initialize
     ** Create a bucket with standard Ambry remote categories: system, test, public, restricted, private
